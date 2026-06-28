@@ -3,14 +3,13 @@ from django.views.decorators.http import require_http_methods
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.core.paginator import Paginator
-from django.db.models import Q
+from django.db.models import Q, Avg
 from .models import Product, Category, Brand
 
 
-@login_required
 def product_list(request):
     """Display list of all products with search and filter"""
-    products = Product.objects.all().order_by('-created_at')
+    products = Product.objects.filter(is_available=True).order_by('-created_at')
     
     # Search functionality
     search_query = request.GET.get('search', '')
@@ -31,13 +30,13 @@ def product_list(request):
         products = products.filter(brand_id=brand_id)
     
     # Pagination
-    paginator = Paginator(products, 10)
+    paginator = Paginator(products, 12)
     page_number = request.GET.get('page')
     page_obj = paginator.get_page(page_number)
     
     # Get all categories and brands for filter dropdowns
     categories = Category.objects.all()
-    brands = Brand.objects.all()
+    brands = Brand.objects.filter(active=True)
     
     context = {
         'page_obj': page_obj,
@@ -52,158 +51,80 @@ def product_list(request):
     return render(request, 'products/product_list.html', context)
 
 
-@login_required
 def product_detail(request, pk):
     """Display product detail page"""
-    product = get_object_or_404(Product, pk=pk)
+    product = get_object_or_404(Product, pk=pk, is_available=True)
+    
+    # Get related products from same category
     related_products = Product.objects.filter(
-        category=product.category
-    ).exclude(pk=pk)[:5]
+        category=product.category,
+        is_available=True
+    ).exclude(pk=pk)[:4]
+    
+    # Get approved reviews
+    reviews = product.reviews.filter(is_approved=True).order_by('-created_at')
+    
+    # Calculate average rating
+    avg_rating = reviews.aggregate(Avg('rating'))['rating__avg'] or 0
     
     context = {
         'product': product,
         'related_products': related_products,
+        'reviews': reviews,
+        'avg_rating': avg_rating,
+        'review_count': reviews.count(),
     }
     
     return render(request, 'products/product_detail.html', context)
 
 
-@login_required
-def product_create(request):
-    """Create a new product"""
-    if request.method == 'POST':
-        name = request.POST.get('name')
-        description = request.POST.get('description')
-        price = request.POST.get('price')
-        cost_price = request.POST.get('cost_price')
-        stock = request.POST.get('stock')
-        low_stock_threshold = request.POST.get('low_stock_threshold', 10)
-        category_id = request.POST.get('category')
-        brand_id = request.POST.get('brand')
-        image = request.FILES.get('image')
-        
-        try:
-            product = Product.objects.create(
-                name=name,
-                description=description,
-                price=price,
-                cost_price=cost_price or None,
-                stock=stock,
-                low_stock_threshold=low_stock_threshold,
-                category_id=category_id or None,
-                brand_id=brand_id or None,
-                image=image
-            )
-            messages.success(request, f'Product "{product.name}" created successfully!')
-            return redirect('product_detail', pk=product.pk)
-        except Exception as e:
-            messages.error(request, f'Error creating product: {str(e)}')
-    
-    categories = Category.objects.all()
-    brands = Brand.objects.all()
-    
-    context = {
-        'categories': categories,
-        'brands': brands,
-    }
-    
-    return render(request, 'products/product_form.html', context)
-
-
-@login_required
-def product_update(request, pk):
-    """Update an existing product"""
-    product = get_object_or_404(Product, pk=pk)
-    
-    if request.method == 'POST':
-        product.name = request.POST.get('name', product.name)
-        product.description = request.POST.get('description', product.description)
-        product.price = request.POST.get('price', product.price)
-        product.cost_price = request.POST.get('cost_price') or None
-        product.stock = request.POST.get('stock', product.stock)
-        product.low_stock_threshold = request.POST.get('low_stock_threshold', product.low_stock_threshold)
-        
-        category_id = request.POST.get('category')
-        product.category_id = category_id or None
-        
-        brand_id = request.POST.get('brand')
-        product.brand_id = brand_id or None
-        
-        if request.FILES.get('image'):
-            product.image = request.FILES.get('image')
-        
-        try:
-            product.save()
-            messages.success(request, f'Product "{product.name}" updated successfully!')
-            return redirect('product_detail', pk=product.pk)
-        except Exception as e:
-            messages.error(request, f'Error updating product: {str(e)}')
-    
-    categories = Category.objects.all()
-    brands = Brand.objects.all()
-    
-    context = {
-        'product': product,
-        'categories': categories,
-        'brands': brands,
-    }
-    
-    return render(request, 'products/product_form.html', context)
-
-
-@login_required
-@require_http_methods(["POST"])
-def product_delete(request, pk):
-    """Delete a product"""
-    product = get_object_or_404(Product, pk=pk)
-    product_name = product.name
-    
-    try:
-        product.delete()
-        messages.success(request, f'Product "{product_name}" deleted successfully!')
-        return redirect('product_list')
-    except Exception as e:
-        messages.error(request, f'Error deleting product: {str(e)}')
-        return redirect('product_detail', pk=pk)
-
-
-@login_required
 def low_stock_products(request):
     """Display products with low stock"""
-    from django.db.models import F
+    products = Product.objects.filter(
+        is_available=True,
+        stock_quantity__lt=10
+    ).order_by('stock_quantity')
     
-    products = Product.objects.filter(stock__lte=F('low_stock_threshold')).order_by('stock')
-    
-    paginator = Paginator(products, 10)
+    paginator = Paginator(products, 12)
     page_number = request.GET.get('page')
     page_obj = paginator.get_page(page_number)
+    
+    # Get filters
+    categories = Category.objects.all()
+    brands = Brand.objects.filter(active=True)
     
     context = {
         'page_obj': page_obj,
         'products': page_obj.object_list,
         'title': 'Low Stock Products',
+        'categories': categories,
+        'brands': brands,
     }
     
-    return render(request, 'products/low_stock_products.html', context)
+    return render(request, 'products/product_list.html', context)
 
 
-@login_required
-def best_selling_products(request):
-    """Display best selling products"""
-    from django.db.models import Count
+def featured_products(request):
+    """Display featured products"""
+    products = Product.objects.filter(
+        is_featured=True,
+        is_available=True
+    ).order_by('-created_at')
     
-    products = Product.objects.annotate(
-        total_sold=Count('order_items')
-    ).order_by('-total_sold')
-    
-    paginator = Paginator(products, 10)
+    paginator = Paginator(products, 12)
     page_number = request.GET.get('page')
     page_obj = paginator.get_page(page_number)
+    
+    # Get filters
+    categories = Category.objects.all()
+    brands = Brand.objects.filter(active=True)
     
     context = {
         'page_obj': page_obj,
         'products': page_obj.object_list,
-        'title': 'Best Selling Products',
+        'title': 'Featured Products',
+        'categories': categories,
+        'brands': brands,
     }
     
-    return render(request, 'products/best_selling_products.html', context)
+    return render(request, 'products/product_list.html', context)
